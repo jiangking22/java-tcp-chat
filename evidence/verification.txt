@@ -1,0 +1,91 @@
+Windows x64 local verification
+Upstream baseline: 3f8d11d4eef5dcb4c9e27eeef71f19700334c1eb
+Local baseline snapshot: 62e672b
+
+== Upstream baseline with the first course acceptance test ==
+javac -encoding UTF-8 --release 21 -Xlint:all -d out [all Java sources]
+java -ea -cp out ChatServerTest
+28 checks passed, 0 failed
+java -ea -cp out CourseAcceptanceTest
+PASS: Unicode delivery, room isolation and room switching.
+java.lang.AssertionError: Timed out waiting for Error: frame exceeds 4096 UTF-8 bytes.
+Exit code: 1
+
+== Final project ==
+java -version
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\chat.ps1 test
+openjdk version "21.0.13" 2026-10-20 LTS
+OpenJDK Runtime Environment Temurin-21.0.13+9 (build 21.0.13+9-LTS)
+OpenJDK 64-Bit Server VM Temurin-21.0.13+9 (build 21.0.13+9-LTS, mixed mode, sharing)
+  ok   bucket le=0.001 counts values <= bound
+  ok   buckets are cumulative
+  ok   +Inf bucket equals count
+  ok   sum is the total of observations
+  ok   HELP and TYPE precede every metric
+  ok   no locale decimal commas
+  ok   ends with newline
+  ok   unknown label values are rejected (bounded cardinality)
+Metrics on http://127.0.0.1:6750/metrics
+Chat server listening on port 6749 (127.0.0.1).
+  ok   /healthz returns 200
+  ok   /readyz returns 200 once the chat port is bound
+  ok   /metrics returns 200
+alice connected from /127.0.0.1
+bob connected from /127.0.0.1
+  ok   2 users logged in
+  ok   2 connections open
+  ok   username collision counted
+  ok   client at the login prompt does not receive chat
+  ok   broadcast counted
+  ok   private counted
+  ok   who counted
+  ok   join counted
+  ok   leave counted
+  ok   latency histogram has one observation per line
+  ok   latency sum is positive and small
+  ok   3 connections open (alice, bob, dup)
+bob connected from /127.0.0.1
+Disconnected: bob (active clients: 2)
+Disconnected: bob (active clients: 2)
+  ok   login failure counted
+  ok   quit counted
+Disconnected: alice (active clients: 1)
+Disconnected: null (active clients: 0)
+  ok   connections gauge returns to 0
+  ok   logged-in gauge returns to 0
+  ok   accepted counter = 4
+
+28 checks passed, 0 failed
+Metrics on http://127.0.0.1:6766/metrics
+Chat server listening on port 6762 (127.0.0.1).
+alice connected from /127.0.0.1
+bob connected from /127.0.0.1
+carol connected from /127.0.0.1
+PASS: Unicode delivery, room isolation and room switching.
+CAROL connected from /127.0.0.1
+Disconnected: carol (active clients: 2)
+Disconnected: CAROL (active clients: 2)
+Disconnected: null (active clients: 2)
+PASS: 4096-byte CRLF frame, oversized frame rejection and cleanup.
+PASS: Case-insensitive reconnect, malformed UTF-8 and bare CR rejection.
+Course acceptance scenarios passed.
+Disconnected: alice (active clients: 0)
+Exit code: 0
+
+== Client and startup smoke checks ==
+Two ChatClient processes connected to a ChatServer on the same machine.
+PASS: two real Java CLI clients completed login, Chinese and emoji room chat, roster, PM, and quit.
+PASS: occupied chat port stops startup with a nonzero exit.
+
+== Loopback load run ==
+.\chat.ps1 load -Port 3032 -Clients 20 -Rooms 2 -MessagesPerSecond 10 -Seconds 10
+load test: 20 clients in 2 rooms, 10 msg/s for 10 s against 127.0.0.1:3032
+connected and logged in: 20/20 in 2.1 s
+
+messages sent:       100 (10.0/s)
+deliveries received: 900 (expected about 900 = sent x 9.0 others per room)
+errors:              0
+end-to-end latency:  p50 0.64 ms   p95 0.96 ms   p99 1.27 ms   max 3.31 ms
+RESULT clients=20 rooms=2 rate=10 seconds=10 connect_s=2.08 sent=100 received=900 expected=900 errors=0 p50_ms=0.64 p95_ms=0.96 p99_ms=1.27 max_ms=3.31
+PASS: documented PowerShell load entry point and local metrics.
+Exit code: 0
