@@ -1,17 +1,12 @@
-import java.io.*;
-import java.net.*;
+import java.io.IOException;
+import java.io.PrintWriter;
+import java.net.Socket;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentSkipListMap;
 
 /**
- * v5: v4c + Prometheus metrics (lines marked [metrics]) and a fix for
- * broadcasting to clients that have not finished logging in (marked [fix]).
- *
- * v4c: Handles ONE client's connection on its own dedicated thread.
- * Adds a basic register/login step (PLAINTEXT, in-memory only -- teaching
- * purposes, not secure) on top of room-scoped broadcast chat, private
- * messaging, room switching, and "/who".
+ * Handles one TCP connection, including login and room-scoped chat.
  */
 public class ClientHandler implements Runnable {
 
@@ -29,17 +24,16 @@ public class ClientHandler implements Runnable {
     // "check if username taken" + "reserve it" a single atomic operation.
     private static final Object userLock = new Object();
 
-    // Registered accounts: username -> password (PLAINTEXT -- teaching only,
-    // never do this in a real system). Lives only in memory: resets on server
-    // restart since we have no persistent storage yet.
-    private static final Map<String, String> registeredUsers = new ConcurrentHashMap<>();
+    // Accounts use the same case-insensitive comparison as connected nicknames.
+    private static final Map<String, PasswordDigest> registeredUsers =
+            new ConcurrentSkipListMap<>(String.CASE_INSENSITIVE_ORDER);
     private static final int MAX_LOGIN_ATTEMPTS = 3;
 
     // Printing every chat line to stdout is fine for a demo, but under load the
     // console becomes the bottleneck and distorts the latency numbers.
-    // CHAT_LOG_MESSAGES=false turns it off (the load test does this).
+    // CHAT_LOG_MESSAGES=true enables it for a classroom demo.
     private static final boolean LOG_MESSAGES =
-            !"false".equalsIgnoreCase(System.getenv().getOrDefault("CHAT_LOG_MESSAGES", "true"));
+            "true".equalsIgnoreCase(System.getenv("CHAT_LOG_MESSAGES"));
 
     private boolean counted = false; // [metrics] did we inc ACTIVE_CONNECTIONS?
 
@@ -54,11 +48,9 @@ public class ClientHandler implements Runnable {
 
     @Override
     public void run() {
-        try (
-                BufferedReader in = new BufferedReader(
-                        new InputStreamReader(socket.getInputStream()));
-                PrintWriter writer = new PrintWriter(socket.getOutputStream(), true)) {
-            this.out = writer; // stored so broadcast() can reach this client too
+        try {
+            ChatProtocol.FrameReader in = new ChatProtocol.FrameReader(socket.getInputStream());
+            this.out = ChatProtocol.writer(socket.getOutputStream());
             Metrics.ACTIVE_CONNECTIONS.inc(); // [metrics] dec in disconnect()
             counted = true;
 
@@ -71,10 +63,15 @@ public class ClientHandler implements Runnable {
                     // Client disconnected before ever choosing a username.
                     return;
                 }
-                candidate = candidate.trim();
+                candidate = candidate.strip();
 
                 if (candidate.isBlank()) {
                     out.println("Username cannot be empty. Try again.");
+                    continue;
+                }
+                if (candidate.codePoints().anyMatch(ch -> Character.isWhitespace(ch)
+                        || Character.isSpaceChar(ch) || Character.isISOControl(ch))) {
+                    out.println("Username must be one word. Try again.");
                     continue;
                 }
 
@@ -121,6 +118,8 @@ public class ClientHandler implements Runnable {
                     break;
                 }
             }
+        } catch (ChatProtocol.FrameException e) {
+            out.println(e.getMessage());
         } catch (IOException e) {
             System.out.println("Connection error: " + e.getMessage());
         } finally {
@@ -157,8 +156,9 @@ public class ClientHandler implements Runnable {
 
     // Handles login (existing account) or registration (new account) for
     // the already-reserved `username`. Returns false if login ultimately fails.
-    private boolean authenticate(BufferedReader in) throws IOException {
-        if (registeredUsers.containsKey(username)) {
+    private boolean authenticate(ChatProtocol.FrameReader in) throws IOException {
+        PasswordDigest registered = registeredUsers.get(username);
+        if (registered != null) {
             // --- Existing account: verify password ---
             for (int attempt = 1; attempt <= MAX_LOGIN_ATTEMPTS; attempt++) {
                 out.println("Enter password:");
@@ -167,7 +167,7 @@ public class ClientHandler implements Runnable {
                     return false; // client disconnected mid-login
                 }
 
-                if (registeredUsers.get(username).equals(password)) {
+                if (registered.matches(password)) {
                     out.println("Login successful. Welcome back, " + username + "!");
                     return true;
                 }
@@ -184,7 +184,7 @@ public class ClientHandler implements Runnable {
                 out.println("Registration cancelled (empty password).");
                 return false;
             }
-            registeredUsers.put(username, password);
+            registeredUsers.put(username, PasswordDigest.create(password));
             out.println("Account created. Welcome, " + username + "!");
             return true;
         }
@@ -202,7 +202,7 @@ public class ClientHandler implements Runnable {
 
         String newRoom = parts[1].trim();
 
-        if (newRoom.equalsIgnoreCase(currentRoom)) {
+        if (newRoom.equals(currentRoom)) {
             out.println("You are already in room: " + currentRoom);
             return;
         }

@@ -1,62 +1,57 @@
-import java.io.*;
-import java.net.*;
+import java.io.BufferedReader;
+import java.io.Console;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.io.PrintWriter;
+import java.net.Socket;
+import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
 import java.util.Scanner;
 
 /**
- * Console chat client.
- *
- * Runs TWO threads:
- * - main thread: reads what YOU type and sends it to the server
- * - listener thread: continuously reads incoming messages from the server
- * and prints them, independent of whether you're mid-typing or not
- *
- * This solves the problem of nc/telnet having no proper input handling,
- * and demonstrates why concurrent I/O matters on the client side too.
+ * Console client with separate threads for keyboard input and network reception.
  */
 public class ChatClient {
     public static void main(String[] args) throws IOException {
-        // [docker] host and port can be given, so the same client reaches a container or a
-        // Kubernetes Service: java ChatClient [host] [port]   (defaults: localhost 5000)
-        String host = args.length > 0 ? args[0] : "localhost";
+        String host = args.length > 0 ? args[0] : "127.0.0.1";
         int port = args.length > 1 ? Integer.parseInt(args[1]) : 5000;
 
-        Socket socket = new Socket(host, port);
-        System.out.println("Connected to server at " + host + ":" + port);
+        try (Socket socket = new Socket(host, port)) {
+            System.out.println("Connected to server at " + host + ":" + port);
 
-        BufferedReader in = new BufferedReader(
-                new InputStreamReader(socket.getInputStream()));
-        PrintWriter out = new PrintWriter(socket.getOutputStream(), true);
+            BufferedReader in = new BufferedReader(
+                    new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
+            PrintWriter out = ChatProtocol.writer(socket.getOutputStream());
 
-        // --- Listener thread: prints whatever the server sends, whenever it arrives
-        // ---
-        Thread listenerThread = new Thread(() -> {
-            try {
-                String serverLine;
-                while ((serverLine = in.readLine()) != null) {
-                    System.out.println(serverLine);
-                }
-                System.out.println("Server closed the connection.");
-            } catch (IOException e) {
-                System.out.println("Disconnected from server.");
-            }
-        });
-        listenerThread.setDaemon(true); // so it doesn't block JVM shutdown
-        listenerThread.start();
+            Thread keyboard = new Thread(() -> sendInput(socket, out), "chat-keyboard");
+            keyboard.setDaemon(true);
+            keyboard.start();
 
-        // --- Main thread: reads your keyboard input and sends it ---
-        Scanner scanner = new Scanner(System.in);
-        String userInput;
-        while (scanner.hasNextLine()) {
-            userInput = scanner.nextLine();
-            out.println(userInput);
-
-            if (userInput.equalsIgnoreCase("quit")) {
-                break;
+            String serverLine;
+            while ((serverLine = in.readLine()) != null) {
+                System.out.println(serverLine);
             }
         }
-
-        socket.close();
-        scanner.close();
         System.out.println("Client shut down.");
+    }
+
+    private static void sendInput(Socket socket, PrintWriter out) {
+        Console console = System.console();
+        Charset inputCharset = console == null ? StandardCharsets.UTF_8 : console.charset();
+        try (Scanner scanner = new Scanner(System.in, inputCharset)) {
+            while (scanner.hasNextLine()) {
+                String userInput = scanner.nextLine();
+                out.println(userInput);
+                if (userInput.equalsIgnoreCase("quit")) {
+                    break;
+                }
+            }
+            socket.shutdownOutput();
+        } catch (IOException e) {
+            // The server can close the socket while the keyboard thread is still reading.
+            if (!socket.isClosed()) {
+                System.err.println("Could not finish sending input: " + e.getMessage());
+            }
+        }
     }
 }

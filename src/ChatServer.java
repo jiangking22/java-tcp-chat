@@ -1,21 +1,15 @@
-import java.io.*;
-import java.net.*;
+import java.io.IOException;
+import java.net.InetSocketAddress;
+import java.net.ServerSocket;
+import java.net.Socket;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
- * v3: Multi-client chat server + Prometheus metrics endpoint.
- *
- * Same thread-per-client design as v2: after accept()ing a client, hand it
- * off to a new Thread and go straight back to accept() for the next one.
- *
- * New in v3:
- * - a second, HTTP port serving /metrics, /healthz and /readyz (MetricsServer)
- * - ports come from environment variables, so Docker / Kubernetes can set them:
- *     CHAT_PORT     (default 5000)  the chat protocol
- *     METRICS_PORT  (default 9100)  Prometheus scrapes this
+ * TCP chat with one handler thread per connection and a local HTTP metrics endpoint.
  */
 public class ChatServer {
+    private static final String LOOPBACK = "127.0.0.1";
 
     // Shared list of all connected clients' handlers.
     // CopyOnWriteArrayList is thread-safe for this "many threads read/write
@@ -25,53 +19,56 @@ public class ChatServer {
 
     private static volatile boolean accepting = false;
 
-    // CHAT_LOG_MESSAGES=false silences per-connection and per-message logging (used under load).
-    private static final boolean LOG_CONNECTIONS =
-            !"false".equalsIgnoreCase(System.getenv().getOrDefault("CHAT_LOG_MESSAGES", "true"));
-
     public static void main(String[] args) throws IOException {
-        run(envInt("CHAT_PORT", 5000), envInt("METRICS_PORT", 9100));
+        String host = System.getenv().getOrDefault("CHAT_HOST", LOOPBACK).trim();
+        if (host.isEmpty()) {
+            host = LOOPBACK;
+        }
+        run(host, envPort("CHAT_PORT", 5000), envPort("METRICS_PORT", 9100));
     }
 
     /** Runs the server until the process exits. Separate from main() so tests can pick ports. */
     public static void run(int port, int metricsPort) throws IOException {
-        MetricsServer metrics = new MetricsServer(metricsPort, () -> accepting);
-        metrics.start();
-        System.out.println("Metrics on http://0.0.0.0:" + metricsPort + "/metrics");
+        run(LOOPBACK, port, metricsPort);
+    }
 
-        try (ServerSocket serverSocket = new ServerSocket(port)) {
-            System.out.println("Chat server listening on port " + port + " ...");
-            accepting = true; // /readyz now returns 200
+    private static void run(String host, int port, int metricsPort) throws IOException {
+        try (ServerSocket serverSocket = new ServerSocket()) {
+            serverSocket.bind(new InetSocketAddress(host, port));
+            MetricsServer metrics = new MetricsServer(metricsPort, () -> accepting);
+            try {
+                metrics.start();
+                System.out.println("Metrics on http://" + LOOPBACK + ":" + metrics.port() + "/metrics");
+                System.out.println("Chat server listening on port " + serverSocket.getLocalPort()
+                        + " (" + host + ").");
+                accepting = true;
 
-            while (true) {
-                // Main thread's ONLY job: accept connections and hand them off.
-                Socket clientSocket = serverSocket.accept();
-                Metrics.CONNECTIONS_ACCEPTED.inc(); // [metrics]
-                if (LOG_CONNECTIONS) {
-                    System.out.println("New connection: " + clientSocket.getInetAddress());
+                while (true) {
+                    Socket clientSocket = serverSocket.accept();
+                    Metrics.CONNECTIONS_ACCEPTED.inc();
+                    ClientHandler handler = new ClientHandler(clientSocket, clients);
+                    clients.add(handler);
+                    new Thread(handler, "chat-client-" + clientSocket.getPort()).start();
                 }
-
-                ClientHandler handler = new ClientHandler(clientSocket, clients);
-                clients.add(handler);
-
-                Thread thread = new Thread(handler);
-                thread.start();
-                // Main thread immediately loops back to accept() -- it does NOT
-                // wait for this client's thread to finish.
+            } finally {
+                accepting = false;
+                metrics.stop();
             }
-        } finally {
-            accepting = false;
         }
     }
 
-    private static int envInt(String name, int fallback) {
+    private static int envPort(String name, int fallback) {
         String v = System.getenv(name);
         if (v == null || v.isBlank()) return fallback;
         try {
-            return Integer.parseInt(v.trim());
+            int port = Integer.parseInt(v.trim());
+            if (port >= 0 && port <= 65535) {
+                return port;
+            }
         } catch (NumberFormatException e) {
-            throw new IllegalArgumentException(name + " must be a number, got: " + v);
+            // Use the same message for out-of-range ports and non-numeric values.
         }
+        throw new IllegalArgumentException(name + " must be an integer from 0 to 65535");
     }
 }
 

@@ -3,6 +3,7 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.PrintWriter;
 import java.net.Socket;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -124,8 +125,8 @@ public class LoadTest {
             socket = new Socket(host, port);
             socket.setTcpNoDelay(true);
             socket.setSoTimeout(10_000);
-            out = new PrintWriter(socket.getOutputStream(), true);
-            in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+            out = ChatProtocol.writer(socket.getOutputStream());
+            in = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
             expect("Enter your username:");
             out.println(user);
             expect("New username");

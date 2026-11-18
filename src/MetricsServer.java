@@ -4,6 +4,7 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.function.BooleanSupplier;
 
@@ -14,20 +15,21 @@ import java.util.function.BooleanSupplier;
  *   GET /healthz  liveness: the process is up and the HTTP thread answers
  *   GET /readyz   readiness: the chat socket is bound and accepting
  *
- * Kubernetes will use /healthz and /readyz as probes in a later step.
- * Metrics live on their own port so they are never exposed on the public chat port.
+ * Metrics are bound to loopback independently of the chat listener.
  */
 public final class MetricsServer {
 
     private final HttpServer http;
+    private final ExecutorService executor;
 
     public MetricsServer(int port, BooleanSupplier ready) throws IOException {
-        http = HttpServer.create(new InetSocketAddress(port), 0);
-        http.setExecutor(Executors.newFixedThreadPool(2, r -> {
+        http = HttpServer.create(new InetSocketAddress("127.0.0.1", port), 0);
+        executor = Executors.newFixedThreadPool(2, r -> {
             Thread t = new Thread(r, "metrics-http");
             t.setDaemon(true);
             return t;
-        }));
+        });
+        http.setExecutor(executor);
         http.createContext("/metrics", ex -> respond(ex, 200,
                 "text/plain; version=0.0.4; charset=utf-8", Metrics.scrape()));
         http.createContext("/healthz", ex -> respond(ex, 200, "text/plain", "ok\n"));
@@ -47,6 +49,7 @@ public final class MetricsServer {
 
     public void stop() {
         http.stop(0);
+        executor.shutdownNow();
     }
 
     private static void respond(HttpExchange ex, int status, String type, String body) throws IOException {
